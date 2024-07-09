@@ -1,0 +1,136 @@
+clc
+clear
+
+addpath('CKC');
+
+sSubjectIndex = '03';
+vTrainTrialIndex = [1,2,3,5,6];   % Trials for determing CKC separation parameters and training LR model
+iTestTrialIndex = 4;              % Trails for test
+iTargetDoFIndex = 1;             % Estimated DoF (proximal joint of thumb)
+vElectrodeChannelNumList = [64,64,64,64,64,64,64];
+iTrialNum = 6;
+iElectrodeNum = length(vElectrodeChannelNumList);
+fSamp_EMG = 2000;    % Sampling frequency of EMG data (Hz)
+fSamp_Glove = 200;   % Sampling frequency of glove data  (Hz)
+fTrialTimeLength = 187;    % Time length of a single trial data  (s)
+
+
+%% Data Loading
+% EMG and glove data
+vEMGList = cell(iTrialNum,iElectrodeNum);
+vGloveList = cell(1,iTrialNum);
+for iTrialIndex = 1:iTrialNum
+    load(['D:\ClassMates\ZZM\程序整理\Data\glove\subject_' sSubjectIndex '\hdkw_kin_exp03_subj' sSubjectIndex '_' num2str(iTrialIndex) '.mat']); 
+    vEMG_Split =  EMGSplit_SingleElectrode(data.emg,vElectrodeChannelNumList);
+    for iElectrodeIndex = 1:iElectrodeNum
+        vEMGList{iTrialIndex,iElectrodeIndex} = vEMG_Split{iElectrodeIndex};
+    end
+    vGloveList{1,iTrialIndex} = data.glove(iTargetDoFIndex,:); 
+end
+
+% Spatial layout of electrode channel
+load('ChannelSpatial_0808.mat');
+vChannelSpatial_NearField = vChannelSpatial; 
+load('ChannelSpatial_0513.mat');
+vChannelSpatial_FarField = vChannelSpatial;
+
+
+%% Data Preprocessing
+% EMG filtering
+for iTrialIndex = 1:iTrialNum
+    for iElectrodeIndex = 1:iElectrodeNum
+        bIfBandPassFilter = true;
+        bIfCombFilter = true;
+        bIfSpaceFilter = false;
+        vFilterParameter_BandPass.iButterOrder = 4;
+        vFilterParameter_BandPass.vFrequencyInterval = [20 500];
+        vFilterParameter_Comb.vFrequencyList = 50:50:500;
+        vFilterParameter_Comb.fFilterQ = 100;
+        vFilterParameter_Space.vFilter =[[1 -1];[-1 1]];
+        vFilterParameter_Space.vStep = [1 1];
+        
+        vEMGList{iTrialIndex,iElectrodeIndex} = Filtering(vEMGList{iTrialIndex,iElectrodeIndex},bIfBandPassFilter,vFilterParameter_BandPass,bIfCombFilter,vFilterParameter_Comb,bIfSpaceFilter,vFilterParameter_Space,fSamp_EMG);
+    end
+end
+
+% Outlier channel detection
+vValidChannelList = cell(iTrialNum,iElectrodeNum);
+for iTrialIndex = 1:iTrialNum
+    for iElectrodeIndex = 1:iElectrodeNum
+        if(iElectrodeIndex<5)
+            vChannelSpatial = vChannelSpatial_FarField;
+        else
+            vChannelSpatial = vChannelSpatial_NearField;
+        end
+        vEMG_2D = OutlierDetection_OutlierValue(EMGReshape_1DTo2D(vEMGList{iTrialIndex,iElectrodeIndex},vChannelSpatial),16,[]);
+        [~,vNormalChannel] = OutlierDetection_OutlierChannel_PautaCriterion(vEMG_2D,0.85);
+        vValidChannelList{iTrialIndex,iElectrodeIndex} = vNormalChannel;
+    end
+end
+
+% Glove data normalization
+fMax = max([max(vGloveList{1,1}),max(vGloveList{1,2}),max(vGloveList{1,3}),max(vGloveList{1,4}),max(vGloveList{1,5}),max(vGloveList{1,6})]);
+fMin = min([min(vGloveList{1,1}),min(vGloveList{1,2}),min(vGloveList{1,3}),min(vGloveList{1,4}),min(vGloveList{1,5}),min(vGloveList{1,6})]);
+vGloveList{1,1} = (vGloveList{1,1}-fMin)/(fMax-fMin);
+vGloveList{1,2} = (vGloveList{1,2}-fMin)/(fMax-fMin);
+vGloveList{1,3} = (vGloveList{1,3}-fMin)/(fMax-fMin);
+vGloveList{1,4} = (vGloveList{1,4}-fMin)/(fMax-fMin);
+vGloveList{1,5} = (vGloveList{1,5}-fMin)/(fMax-fMin);
+vGloveList{1,6} = (vGloveList{1,6}-fMin)/(fMax-fMin);
+
+
+%% EMG Decomposition by gCKC
+vWList = cell(iTrialNum,iElectrodeNum); 
+vCtxList = cell(iTrialNum,iElectrodeNum);
+vCentroidsList = cell(iTrialNum,iElectrodeNum);
+vRawMUNumList = cell(iTrialNum,iElectrodeNum);
+for iTrialIndex = 1:iTrialNum
+    for iElectrodeIndex = 1:iElectrodeNum
+        if(iElectrodeIndex<5)
+            vChannelSpatial = vChannelSpatial_FarField;
+        else
+            vChannelSpatial = vChannelSpatial_NearField;
+        end
+        
+        vResult_CKC = Decomp_CKC(vEMGList{iTrialIndex,iElectrodeIndex}, vChannelSpatial);
+        vWList{iTrialIndex,iElectrodeIndex} = vResult_CKC.vW_Valid;
+        vCtxList{iTrialIndex,iElectrodeIndex} = vResult_CKC.vCtx_Valid;
+        vCentroidsList{iTrialIndex,iElectrodeIndex} = vResult_CKC.vCentroids_Valid;
+        vRawMUNumList{iTrialIndex,iElectrodeIndex} = size(vResult_CKC.vSpikeIndex_Valid,2);
+    end
+end
+
+
+%% swCKC decomposition on train trials
+vParameters_swCKC.vValidChannelList = vValidChannelList;
+vParameters_swCKC.vChannelSpatial_NearField = vChannelSpatial_NearField;
+vParameters_swCKC.vChannelSpatial_FarField = vChannelSpatial_FarField;
+vParameters_swCKC.vTrainTrialIndex = vTrainTrialIndex;
+vDecompParameters_gCKC.vWList = vWList;
+vDecompParameters_gCKC.vCtxList = vCtxList;
+vDecompParameters_gCKC.vCentroidsList = vCentroidsList;
+vDecompParameters_gCKC.vRawMUNumList = vRawMUNumList;
+vParameters_swCKC.vDecompParameters_gCKC = vDecompParameters_gCKC;
+vResult_swCKC = Decomp_swCKC(vEMGList, vParameters_swCKC);
+vSpikeList_swCKC_Train = vResult_swCKC.vSpikeList_swCKC_Deduplicate;
+
+
+%% swCKC decomposition on test trial
+vEMGList_Test = vEMGList(iTestTrialIndex,:);
+vParameters_swCKC_Forward.vCtxList = vResult_swCKC.vCtxList_swCKC_Deduplicate;
+vParameters_swCKC_Forward.vWList = vResult_swCKC.vWList_swCKC_Deduplicate;
+vParameters_swCKC_Forward.vCentroidsList = vResult_swCKC.vCentroidsList_swCKC_Deduplicate;
+vParameters_swCKC_Forward.vTrialIndexofMUList = vResult_swCKC.vTrialIndexofMU_swCKC_Deduplicate;
+vParameters_swCKC_Forward.vChannelSpatial_FarField = vChannelSpatial_FarField;
+vParameters_swCKC_Forward.vChannelSpatial_NearField = vChannelSpatial_NearField;
+vParameters_swCKC_Forward.vValidChannelList = vValidChannelList;
+vResult_swCKC_Forward = Decomp_swCKC_Forward(vEMGList_Test,vParameters_swCKC_Forward);
+vSpikeList_swCKC_Test = vResult_swCKC_Forward.vSpikeList_swCKC;
+
+
+%% Training and testing data generation
+% Training data
+vSpikeList_Train_FarField = cell(1,0);
+vSpikeList_Train_NearField = cell(1,0);
+for iElect
+
